@@ -516,3 +516,31 @@ export const QUICK_FOODS = [
   { name: 'Beef jerky, 1 oz', kcal: 80, p: 13, c: 3, f: 1 },
   { name: 'Whole milk, 1 cup', kcal: 150, p: 8, c: 12, f: 8 },
 ];
+
+// ---------- Training blocks ----------
+// Each block runs the same workouts for 4 weeks: weeks 1-3 build, week 4 is lighter (deload).
+// reps/rest override by tier (1 main, 2 secondary, 3 accessory) where the slot uses a numeric range.
+// swaps rotate supporting exercises; your own plan changes always win over these.
+export const BLOCK_WEEKS = 4;
+export const BLOCKS = [
+  {
+    name: 'Rebuild', goal: 'Get tendons and technique back after time off. Moderate weight, leave reps in the tank.',
+    rir: ['3 reps in the tank', '2 in the tank', '1-2 in the tank'],
+    reps: null, rest: null, swaps: {},
+  },
+  {
+    name: 'Strength', goal: 'Heavier main lifts, lower reps. Keeps your strength while the calories are low.',
+    rir: ['2 reps in the tank', '1-2 in the tank', '1 in the tank'],
+    reps: { 1: '4-6', 2: '6-8', 3: '10-12' }, rest: { 1: 210, 2: 150 },
+    swaps: { 'upperA:2': 'landmine_press', 'upperB:1': 'assisted_pullup', 'lowerB:1': 'smith_squat' },
+  },
+  {
+    name: 'Build', goal: 'More reps and new variations for muscle. Shorter rest, more of a pump.',
+    rir: ['2 reps in the tank', '1-2 in the tank', '0-1 in the tank on the last set'],
+    reps: { 1: '6-10', 2: '8-12', 3: '12-20' }, rest: { 1: 150, 2: 90, 3: 45 },
+    swaps: { 'lowerA:2': 'db_reverse_lunge', 'upperA:1': 'seated_cable_row', 'upperB:2': 'db_row', 'lowerB:4': 'step_up' },
+  },
+];
+
+// Cardio minutes by week of the block (week 4 is the light week).
+export const CARDIO_WEEKS = { finisher: [15, 15, 20, 10], steady: [35, 40, 45, 30] };

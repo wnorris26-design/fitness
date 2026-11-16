@@ -1,7 +1,8 @@
-import { EX, ALT_REASONS, MOBILITY, CARDIO, DAYS, WEEK_TEMPLATES, SCHEDULE_HINT, LENGTH_CAP, QUICK_FOODS } from './data.js';
+import { EX, ALT_REASONS, MOBILITY, CARDIO, DAYS, WEEK_TEMPLATES, SCHEDULE_HINT, LENGTH_CAP, QUICK_FOODS, BLOCKS, BLOCK_WEEKS, CARDIO_WEEKS } from './data.js';
 import { load, save, saveNow, defaultState, today, uid } from './store.js';
 
 let state = load();
+if (!state.block) state.block = { n: 1, start: state.profile.startDate || today() };
 let tab = (() => { try { return localStorage.getItem('workoutpal.tab') || 'today'; } catch { return 'today'; } })();
 let foodDate = today();
 let trendEx = null;
@@ -38,10 +39,19 @@ function plan() {
   const cap = LENGTH_CAP[p.sessionMin] || 6;
   return keys.map((k) => {
     const d = DAYS[k];
-    let slots = d.slots.map((s, i) => ({ ...s, key: `${k}:${i}`, base: s.ex }));
+    const b = blockDef();
+    let slots = d.slots.map((s, i) => {
+      const key = `${k}:${i}`;
+      const ranged = /^\d+\s*-\s*\d+$/.test(s.reps);
+      const ex = b.swaps[key] || s.ex;
+      return { ...s, key, base: ex, ex,
+        reps: ranged && b.reps?.[s.tier] ? b.reps[s.tier] : s.reps,
+        rest: b.rest?.[s.tier] ?? s.rest,
+        sets: blockWeek() === BLOCK_WEEKS ? Math.max(1, Math.ceil(s.sets / 2)) : s.sets };
+    });
     if (k !== 'cardio') slots = slots.slice(0, cap);
     slots = slots.map((s) => {
-      let ex = state.swaps[s.key] && state.swaps[s.key] !== SKIP ? state.swaps[s.key] : s.ex;
+      let ex = state.swaps[s.key] && state.swaps[s.key] !== SKIP ? state.swaps[s.key] : s.base;
       if (!p.rack && EX[ex].equip === 'Barbell rack') ex = EX[ex].alts.busy.find((a) => EX[a].equip !== 'Barbell rack') || ex;
       return { ...s, ex };
     }).filter((s) => state.swaps[s.key] !== SKIP);
@@ -57,13 +67,24 @@ function nextDayKey() {
   return keys[(i + 1) % keys.length];
 }
 const weekNum = () => Math.max(1, Math.floor((new Date(today()) - new Date(state.profile.startDate)) / 864e5 / 7) + 1);
+const rawBlockWeek = () => Math.max(1, Math.floor((new Date(today()) - new Date(state.block.start)) / 864e5 / 7) + 1);
+const blockWeek = () => Math.min(BLOCK_WEEKS, rawBlockWeek());
+const blockDone = () => rawBlockWeek() > BLOCK_WEEKS;
+const blockDef = (n = state.block.n) => BLOCKS[(n - 1) % BLOCKS.length];
+const isDeload = () => blockWeek() === BLOCK_WEEKS;
+const cardioMin = (kind) => CARDIO_WEEKS[kind]?.[blockWeek() - 1] ?? CARDIO[kind].minutes;
+function blockLabel() {
+  const b = blockDef();
+  return `Block ${state.block.n} · ${b.name} · Week ${blockWeek()} of ${BLOCK_WEEKS}${isDeload() ? ' (light week)' : ''}`;
+}
+function effortCue() { return isDeload() ? 'Light week: half the sets, about 90% of the weight, nothing hard.' : `Effort: ${blockDef().rir[blockWeek() - 1]} on every set.`; }
 
 // ---------------- History helpers ----------------
 function lastSets(exId, excludeId) {
   const ss = state.sessions.filter((s) => s.id !== excludeId && s.finished).sort((a, b) => b.startedAt - a.startedAt);
   for (const s of ss) {
     const e = s.exercises.find((x) => x.ex === exId && x.sets.some((st) => st.done));
-    if (e) return { date: s.date, sets: e.sets.filter((st) => st.done) };
+    if (e) return { date: s.date, sets: e.sets.filter((st) => st.done), reps: e.target?.reps, deload: !!s.deload };
   }
   return null;
 }
@@ -71,18 +92,28 @@ const topOfRange = (reps) => { const m = String(reps).match(/(\d+)\s*-\s*(\d+)/)
 const bottomOfRange = (reps) => parseInt(reps) || 0;
 const e1rm = (w, r) => (r > 0 && w > 0 ? w * (1 + Math.min(r, 15) / 30) : 0);
 
+const roundW = (w) => (w < 25 ? Math.round(w / 2.5) * 2.5 : Math.round(w / 5) * 5);
 function suggestion(exId, reps, sessionId) {
   const last = lastSets(exId, sessionId);
-  if (!last) return { w: '', text: 'First time: pick a weight you could do for 2-3 more reps than the target.' };
-  const top = topOfRange(reps);
+  if (!last) return { w: '', text: 'First time: pick a weight you could do for 2-3 more reps than the target. Type it in.' };
+  const top = topOfRange(reps), bottom = bottomOfRange(reps);
   const w = Math.max(...last.sets.map((s) => num(s.w)));
-  const allTop = top && last.sets.every((s) => num(s.r) >= top);
-  if (allTop && w > 0) {
+  if (!(w > 0)) return { w: '', text: 'Beat last time.' };
+  const best = last.sets.reduce((a, s) => (e1rm(num(s.w), num(s.r)) > a.v ? { v: e1rm(num(s.w), num(s.r)), s } : a), { v: 0, s: null });
+  if (isDeload()) { const d = roundW(w * 0.9); return { w: d, text: `Light week: ${d} (about 90% of last time's ${w}). Stop well short of failure.` }; }
+  if (last.deload || (last.reps && last.reps !== reps && /\d+\s*-\s*\d+/.test(reps) && best.v)) {
+    // rep range changed (new block) or coming off a light week: estimate from best recent set
+    const est = roundW(best.v / (1 + (bottom + 2) / 30));
+    return { w: est, text: `New target of ${reps} reps. ${est} is estimated from your best recent set (${best.s.w}×${best.s.r}).` };
+  }
+  const minR = Math.min(...last.sets.map((s) => num(s.r)));
+  if (top && last.sets.every((s) => num(s.r) >= top)) {
     const eq = EX[exId].equip;
-    const inc = eq === 'Barbell rack' || eq === 'Smith machine' ? (EX[exId].group.match(/Legs|Hamstrings/) ? 10 : 5) : 5;
+    const inc = (eq === 'Barbell rack' || eq === 'Smith machine' || eq === 'Machine') && /Legs|Hamstrings/.test(EX[exId].group) ? 10 : 5;
     return { w: w + inc, text: `You hit ${top} on every set last time. Go up to ${w + inc}.` };
   }
-  return { w: w || '', text: w ? `Stay at ${w} and beat last time's reps.` : 'Beat last time.' };
+  if (bottom && minR < bottom - 1) { const d = roundW(w * 0.95); return { w: d, text: `Last time dropped to ${minR} reps at ${w}. Try ${d} and own the ${reps} range.` }; }
+  return { w, text: `Stay at ${w} and add a rep or two (last: ${last.sets.map((s) => s.r).join(', ')}).` };
 }
 
 // ---------------- Session actions ----------------
@@ -95,8 +126,8 @@ function startSession(dayKey) {
       const sug = suggestion(sl.ex, sl.reps, id);
       return { slotKey: sl.key, ex: sl.ex, planned: sl.ex, target: { sets: sl.sets, reps: sl.reps, rest: sl.rest }, sets: Array.from({ length: sl.sets }, () => ({ w: sug.w, r: '', done: false })) };
     }),
-    cardio: { type: 'Incline treadmill', minutes: CARDIO[d.cardio].minutes, incline: CARDIO[d.cardio].incline, speed: CARDIO[d.cardio].speed, done: false, plan: d.cardio },
-    mobility: d.mobility, notes: '',
+    cardio: { type: 'Incline treadmill', minutes: cardioMin(d.cardio), incline: CARDIO[d.cardio].incline, speed: CARDIO[d.cardio].speed, done: false, plan: d.cardio },
+    mobility: d.mobility, notes: '', block: state.block.n, deload: isDeload(),
   };
   state.sessions.push(s);
   state.activeId = id;
@@ -177,9 +208,11 @@ function viewToday() {
   const done = state.sessions.filter((x) => x.finished);
   const thisWeek = done.filter((x) => (Date.now() - x.startedAt) / 864e5 < 7).length;
   return `
-  <header class="top"><p class="eyebrow">Week ${weekNum()} · ${new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}</p><h1>Up next</h1></header>
+  <header class="top"><p class="eyebrow">${esc(blockLabel())}</p><h1>Up next</h1></header>
+  ${blockDone() ? `<section class="card block-done"><p class="eyebrow">Block ${state.block.n} complete</p><h3>Nice month. Ready for Block ${state.block.n + 1}: ${esc(blockDef(state.block.n + 1).name)}?</h3><p class="small">${esc(blockDef(state.block.n + 1).goal)}</p><div class="row wrap"><button class="btn primary" data-act="next-block">Start Block ${state.block.n + 1}</button><button class="btn ghost" data-act="repeat-block">Repeat this block</button></div></section>` : ''}
   <section class="hero card">
-    <div class="hero-head"><div><p class="eyebrow">${esc(nd.focus)}</p><h2>${esc(nd.name)}</h2></div><span class="pill">${nd.slots.length} lifts · ${CARDIO[nd.cardio].minutes} min walk</span></div>
+    <div class="hero-head"><div><p class="eyebrow">${esc(nd.focus)}</p><h2>${esc(nd.name)}</h2></div><span class="pill">${nd.slots.length} lifts · ${cardioMin(nd.cardio)} min walk</span></div>
+    <p class="small">${esc(effortCue())}</p>
     <ol class="mini-list">${nd.slots.map((sl) => `<li><span>${esc(EX[sl.ex].name)}</span><span class="mono">${sl.sets}×${esc(sl.reps)}</span></li>`).join('')}</ol>
     <button class="btn primary big" data-act="start" data-day="${nk}">Start ${esc(nd.name)}</button>
   </section>
@@ -203,6 +236,7 @@ function viewSession(s) {
   return `
   <header class="top"><p class="eyebrow">In progress · ${mins} min · ${doneSets}/${allSets} sets</p><h1>${esc(s.dayName)}</h1></header>
   ${(() => { const prev = state.sessions.filter((x) => x.finished && x.dayKey === s.dayKey && x.notes && x.notes.trim()).sort((a, b) => b.startedAt - a.startedAt)[0]; return prev ? `<section class="card last-note"><p class="eyebrow">Your note from last ${esc(s.dayName)} · ${new Date(prev.date + 'T12:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</p><p>${esc(prev.notes)}</p><p class="small muted">Want to change the plan because of it? Use Swap below, or Plan → Change to make it stick.</p></section>` : ''; })()}
+  <p class="small effort">${esc(effortCue())}</p>
   <details class="card warm" ${Object.keys(s.warmup).length < mob.items.length ? 'open' : ''}>
     <summary><span><b>${esc(mob.name)}</b> <span class="muted small">~${mob.minutes} min</span></span><span class="pill">${Object.values(s.warmup).filter(Boolean).length}/${mob.items.length}</span></summary>
     <ul class="checks">${mob.items.map((m, i) => `<li><label><input type="checkbox" id="wu-${i}" data-act="warm" data-i="${i}" ${s.warmup[i] ? 'checked' : ''}><span><b>${esc(m.name)}</b> <span class="mono small">${esc(m.dose)}</span><br><span class="muted small">${esc(m.why)}</span></span></label></li>`).join('')}</ul>
@@ -238,10 +272,10 @@ function exCard(s, e, i) {
       <button class="btn small" data-act="swap" data-i="${i}" aria-label="Swap exercise">Swap</button>
     </div>
     <p class="target"><span class="mono">${e.target.sets} × ${esc(e.target.reps)}</span> · rest ${Math.floor(e.target.rest / 60)}:${String(e.target.rest % 60).padStart(2, '0')}</p>
-    <p class="small">${esc(sug.text)}${last ? ` <span class="muted">Last (${esc(last.date.slice(5))}): ${last.sets.map((st) => `${esc(st.w)}×${esc(st.r)}`).join(', ')}</span>` : ''}</p>
+    <p class="small"><b>Suggested:</b> ${esc(sug.text)} <span class="muted">Edit any number.</span>${last ? ` <span class="muted">Last (${esc(last.date.slice(5))}): ${last.sets.map((st) => `${esc(st.w)}×${esc(st.r)}`).join(', ')}</span>` : ''}</p>
     <details class="cues"><summary>Form cues${x.elbow ? ' + elbow note' : ''}</summary><p class="small">${esc(x.cues)}</p>${x.elbow ? `<p class="small elbow"><b>Right elbow:</b> ${esc(x.elbow)}</p>` : ''}</details>
     <div class="sets">
-      <div class="set-row head"><span>Set</span><span>lb</span><span>Reps</span><span></span></div>
+      <div class="set-row head"><span>Set</span><span>${x.equip === 'Dumbbell' ? 'lb each' : 'lb'}</span><span>Reps</span><span></span></div>
       ${e.sets.map((st, j) => `
       <div class="set-row ${st.done ? 'done' : ''}">
         <span class="mono">${j + 1}</span>
@@ -258,7 +292,16 @@ function viewPlan() {
   const p = state.profile;
   const pl = plan();
   return `
-  <header class="top"><p class="eyebrow">Week ${weekNum()} of your plan</p><h1>Your plan</h1></header>
+  <header class="top"><p class="eyebrow">${esc(blockLabel())}</p><h1>Your plan</h1></header>
+  ${blockDone() ? `<section class="card block-done"><p class="eyebrow">Block ${state.block.n} complete</p><h3>Nice month. Ready for Block ${state.block.n + 1}: ${esc(blockDef(state.block.n + 1).name)}?</h3><p class="small">${esc(blockDef(state.block.n + 1).goal)}</p><div class="row wrap"><button class="btn primary" data-act="next-block">Start Block ${state.block.n + 1}</button><button class="btn ghost" data-act="repeat-block">Repeat this block</button></div></section>` : ''}
+  <section class="card">
+    <div class="ex-head"><div><p class="eyebrow">Block ${state.block.n} · started ${new Date(state.block.start + 'T12:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</p><h3>${esc(blockDef().name)}</h3></div><span class="pill">${isDeload() ? 'Light week' : 'Week ' + blockWeek() + '/' + BLOCK_WEEKS}</span></div>
+    <p class="small">${esc(blockDef().goal)}</p>
+    <div class="weeks">${Array.from({ length: BLOCK_WEEKS }, (_, i) => `<div class="wk ${i + 1 < blockWeek() ? 'past' : i + 1 === blockWeek() ? 'now' : ''}"><b>Wk ${i + 1}</b><span>${i + 1 === BLOCK_WEEKS ? 'Light' : esc(blockDef().rir[i].replace(' in the tank', '').replace(' reps', '')) + ' RIR'}</span></div>`).join('')}</div>
+    <p class="small muted">RIR = reps in reserve, how many more you could have done. Same workouts all block; the app moves your weights up as you hit the top of each rep range.</p>
+    <ol class="roadmap">${[0, 1, 2].map((o) => { const n = state.block.n + o; const b = blockDef(n); return `<li class="${o ? '' : 'now'}"><b>Block ${n}: ${esc(b.name)}</b><span class="muted small">${b.reps ? `Main lifts ${b.reps[1]} reps` : 'Rep ranges as listed'}${Object.keys(b.swaps).length ? ` · ${Object.keys(b.swaps).length} exercise changes` : ''}</span></li>`; }).join('')}</ol>
+    <div class="row wrap"><button class="btn small ghost" data-act="next-block">Start Block ${state.block.n + 1} now</button><button class="btn small ghost" data-act="repeat-block">Restart this block</button></div>
+  </section>
   <section class="card">
     <h3>Build it</h3>
     <div class="seg-group">
@@ -276,10 +319,10 @@ function viewPlan() {
     <h3>How it progresses</h3>
     <ul class="small">
       <li><b>Double progression.</b> Each lift has a rep range. When you hit the top of it on every set, add weight next time: 5 lb for dumbbells and upper body, 10 lb for barbell legs. The Today screen tells you when.</li>
-      <li><b>Weeks 1-2:</b> leave 3 reps in the tank. You're coming back from 6 months off, so let tendons catch up.</li>
-      <li><b>Week 3 on:</b> leave 1-2 reps in the tank on main lifts.</li>
-      <li><b>Every 6th week:</b> same exercises, cut sets in half and drop the weight about 10%.</li>
-      <li><b>Cardio:</b> 15 min incline walk after every lift, plus one long walk day. Add 5 min or 1% incline per week.</li>
+      <li><b>Blocks:</b> 4 weeks each, same workouts the whole time. Weeks 1-3 push a little harder each week; week 4 is light (half the sets, about 90% of the weight).</li>
+      <li><b>New block:</b> rep ranges change and a few supporting exercises rotate. Your first weights are estimated from your best recent sets, so you're not guessing.</li>
+      <li><b>Missed reps:</b> if a set falls 2+ reps under the range, the next suggestion drops the weight about 5%.</li>
+      <li><b>Cardio:</b> the incline walk grows each week of a block (long walk 35 → 40 → 45 min, finishers 15 → 20), then eases off on the light week.</li>
       <li><b>On 2,000-2,200 kcal</b> strength may dip a little. Keep protein high, sleep 7+ hours, and if your main lifts drop 2 weeks in a row, eat 200 more on lifting days.</li>
     </ul>
   </section>
@@ -298,7 +341,7 @@ function viewPlan() {
     <div class="ex-head"><div><p class="eyebrow">${esc(d.focus)}</p><h3>${esc(d.name)}</h3></div><button class="btn small" data-act="start" data-day="${d.key}">Start</button></div>
     <ol class="plan-list">${d.slots.map((sl) => `<li><div><b>${esc(EX[sl.ex].name)}</b>${sl.ex !== sl.base ? ' <span class="pill tiny">swapped</span>' : ''}<br><span class="muted small">${sl.sets} × ${esc(sl.reps)} · ${EX[sl.ex].equip}</span></div><button class="btn small ghost" data-act="plan-swap" data-k="${sl.key}">Change</button></li>`).join('')}
     ${d.removed.map((sl) => `<li class="removed"><div><s>${esc(EX[sl.ex].name)}</s><br><span class="muted small">Removed</span></div><button class="btn small ghost" data-act="restore" data-k="${sl.key}">Add back</button></li>`).join('')}
-    <li><div><b>${esc(CARDIO[d.cardio].label)}</b><br><span class="muted small">${CARDIO[d.cardio].minutes} min · ${CARDIO[d.cardio].incline}% · ${CARDIO[d.cardio].speed} mph</span></div></li></ol>
+    <li><div><b>${esc(CARDIO[d.cardio].label)}</b><br><span class="muted small">${cardioMin(d.cardio)} min · ${CARDIO[d.cardio].incline}% · ${CARDIO[d.cardio].speed} mph</span></div></li></ol>
   </section>`).join('')}
   <section class="card">
     <h3>${esc(MOBILITY.long.name)}</h3>
@@ -560,6 +603,8 @@ document.addEventListener('click', (ev) => {
       sheet = null; persist(); render(); return;
     }
     case 'restore': delete state.swaps[a.dataset.k]; persist(); render(); toast('Added back'); return;
+    case 'next-block': state.block = { n: state.block.n + 1, start: today() }; persist(); render(); window.scrollTo(0, 0); toast(`Block ${state.block.n}: ${blockDef().name} started`); return;
+    case 'repeat-block': state.block = { n: state.block.n, start: today() }; persist(); render(); toast('Block restarted at week 1'); return;
     case 'cardio-done': s.cardio.done = !s.cardio.done; persist(); render(); return;
     case 'finish': {
       s.finished = true; s.endedAt = Date.now(); state.activeId = null; stopRest(); saveNow(state);
@@ -592,7 +637,7 @@ document.addEventListener('click', (ev) => {
 });
 
 function setSwap(key, id) {
-  const base = DAYS[key.split(':')[0]].slots[+key.split(':')[1]].ex;
+  const base = blockDef().swaps[key] || DAYS[key.split(':')[0]].slots[+key.split(':')[1]].ex;
   if (id === base) delete state.swaps[key]; else state.swaps[key] = id;
 }
 
@@ -604,7 +649,14 @@ function addFood(f) {
 document.addEventListener('change', (ev) => {
   const el = ev.target;
   const s = active();
-  if (el.dataset.set) { const st = s.exercises[+el.dataset.i].sets[+el.dataset.j]; st[el.dataset.set] = el.value; persist(); return; }
+  if (el.dataset.set) {
+    const i = +el.dataset.i, j = +el.dataset.j, sets = s.exercises[i].sets, st = sets[j];
+    const old = st[el.dataset.set];
+    st[el.dataset.set] = el.value;
+    // changing a weight carries it to later sets that still had the same number
+    if (el.dataset.set === 'w') sets.forEach((x, k) => { if (k > j && !x.done && String(x.w) === String(old)) { x.w = el.value; const inp = $(`#w-${i}-${k}`); if (inp) inp.value = el.value; } });
+    persist(); return;
+  }
   if (el.dataset.cf) { s.cardio[el.dataset.cf] = el.value; persist(); if (el.dataset.cf === 'type') render(); else { const est = $('#c-est'); if (est) est.textContent = `≈ ${fmt(walkKcal(num(s.cardio.minutes), num(s.cardio.incline), num(s.cardio.speed)))} kcal burned (estimate)`; } return; }
   if (el.dataset.act === 'notes') { s.notes = el.value; persist(); return; }
   if (el.dataset.act === 'trend') { trendEx = el.value; render(); return; }
