@@ -263,3 +263,6 @@ body:has(.rest:not([hidden])) { padding-bottom: calc(var(--tabs-h) + env(safe-ar
   .stat b { font-size: 1.4rem; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+.last-note { border-color: var(--accent); background: var(--accent-soft); }
+.removed s { color: var(--muted); }
+.sheet details .section-h { margin-top: 10px; }

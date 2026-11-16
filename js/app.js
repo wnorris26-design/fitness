@@ -15,6 +15,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
 const fmt = (n, d = 0) => Number(n).toLocaleString(undefined, { maximumFractionDigits: d, minimumFractionDigits: d });
 const persist = () => save(state);
+const SKIP = '__skip__';
 
 // ---------------- Targets ----------------
 export function maintenance(p) {
@@ -40,11 +41,12 @@ function plan() {
     let slots = d.slots.map((s, i) => ({ ...s, key: `${k}:${i}`, base: s.ex }));
     if (k !== 'cardio') slots = slots.slice(0, cap);
     slots = slots.map((s) => {
-      let ex = state.swaps[s.key] || s.ex;
+      let ex = state.swaps[s.key] && state.swaps[s.key] !== SKIP ? state.swaps[s.key] : s.ex;
       if (!p.rack && EX[ex].equip === 'Barbell rack') ex = EX[ex].alts.busy.find((a) => EX[a].equip !== 'Barbell rack') || ex;
       return { ...s, ex };
-    });
-    return { key: k, ...d, slots };
+    }).filter((s) => state.swaps[s.key] !== SKIP);
+    const removed = d.slots.map((s, i) => ({ ...s, key: `${k}:${i}` })).filter((s) => state.swaps[s.key] === SKIP);
+    return { key: k, ...d, slots, removed };
   });
 }
 function nextDayKey() {
@@ -200,6 +202,7 @@ function viewSession(s) {
   const c = s.cardio;
   return `
   <header class="top"><p class="eyebrow">In progress · ${mins} min · ${doneSets}/${allSets} sets</p><h1>${esc(s.dayName)}</h1></header>
+  ${(() => { const prev = state.sessions.filter((x) => x.finished && x.dayKey === s.dayKey && x.notes && x.notes.trim()).sort((a, b) => b.startedAt - a.startedAt)[0]; return prev ? `<section class="card last-note"><p class="eyebrow">Your note from last ${esc(s.dayName)} · ${new Date(prev.date + 'T12:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</p><p>${esc(prev.notes)}</p><p class="small muted">Want to change the plan because of it? Use Swap below, or Plan → Change to make it stick.</p></section>` : ''; })()}
   <details class="card warm" ${Object.keys(s.warmup).length < mob.items.length ? 'open' : ''}>
     <summary><span><b>${esc(mob.name)}</b> <span class="muted small">~${mob.minutes} min</span></span><span class="pill">${Object.values(s.warmup).filter(Boolean).length}/${mob.items.length}</span></summary>
     <ul class="checks">${mob.items.map((m, i) => `<li><label><input type="checkbox" id="wu-${i}" data-act="warm" data-i="${i}" ${s.warmup[i] ? 'checked' : ''}><span><b>${esc(m.name)}</b> <span class="mono small">${esc(m.dose)}</span><br><span class="muted small">${esc(m.why)}</span></span></label></li>`).join('')}</ul>
@@ -294,6 +297,7 @@ function viewPlan() {
   <section class="card">
     <div class="ex-head"><div><p class="eyebrow">${esc(d.focus)}</p><h3>${esc(d.name)}</h3></div><button class="btn small" data-act="start" data-day="${d.key}">Start</button></div>
     <ol class="plan-list">${d.slots.map((sl) => `<li><div><b>${esc(EX[sl.ex].name)}</b>${sl.ex !== sl.base ? ' <span class="pill tiny">swapped</span>' : ''}<br><span class="muted small">${sl.sets} × ${esc(sl.reps)} · ${EX[sl.ex].equip}</span></div><button class="btn small ghost" data-act="plan-swap" data-k="${sl.key}">Change</button></li>`).join('')}
+    ${d.removed.map((sl) => `<li class="removed"><div><s>${esc(EX[sl.ex].name)}</s><br><span class="muted small">Removed</span></div><button class="btn small ghost" data-act="restore" data-k="${sl.key}">Add back</button></li>`).join('')}
     <li><div><b>${esc(CARDIO[d.cardio].label)}</b><br><span class="muted small">${CARDIO[d.cardio].minutes} min · ${CARDIO[d.cardio].incline}% · ${CARDIO[d.cardio].speed} mph</span></div></li></ol>
   </section>`).join('')}
   <section class="card">
@@ -477,7 +481,9 @@ function viewSheet() {
     <div class="alts">${alts.map((a) => item(a, '')).join('')}</div>
     ${cur !== planned ? `<h4 class="section-h">Back to the original</h4><div class="alts">${item(planned, 'planned')}</div>` : ''}
     ${more.length ? `<details><summary class="small">More ${esc(x.group.toLowerCase())} options</summary><div class="alts">${more.map((a) => item(a, '')).join('')}</div></details>` : ''}
-    ${sheet.mode === 'session' ? `<label class="toggle"><input type="checkbox" id="sh-keep" ${sheet.keep ? 'checked' : ''} data-act="keep"><span>Also make it my default in the plan</span></label>` : ''}
+    <details><summary class="small">Pick any exercise</summary>${[...new Set(Object.values(EX).map((e) => e.group))].map((g) => `<h4 class="section-h">${esc(g)}</h4><div class="alts">${Object.keys(EX).filter((k) => EX[k].group === g && k !== cur).map((a) => item(a, '')).join('')}</div>`).join('')}</details>
+    <button class="btn ghost full" data-act="drop">${sheet.mode === 'session' ? 'Skip it today' : 'Remove from my plan'}</button>
+    ${sheet.mode === 'session' ? `<label class="toggle"><input type="checkbox" id="sh-keep" ${sheet.keep ? 'checked' : ''} data-act="keep"><span>Also make this change in my plan (swap or skip)</span></label>` : ''}
     <button class="btn ghost full" data-act="close-sheet">Cancel</button>
   </div>`;
 }
@@ -541,6 +547,19 @@ document.addEventListener('click', (ev) => {
       }
       sheet = null; persist(); render(); return;
     }
+    case 'drop': {
+      if (sheet.mode === 'session') {
+        const e = s.exercises[sheet.idx];
+        if (sheet.keep) state.swaps[e.slotKey] = SKIP;
+        s.exercises.splice(sheet.idx, 1);
+        toast(sheet.keep ? `Removed ${EX[e.ex].name} from your plan` : `Skipped ${EX[e.ex].name}`);
+      } else {
+        state.swaps[sheet.key] = SKIP;
+        toast('Removed from your plan');
+      }
+      sheet = null; persist(); render(); return;
+    }
+    case 'restore': delete state.swaps[a.dataset.k]; persist(); render(); toast('Added back'); return;
     case 'cardio-done': s.cardio.done = !s.cardio.done; persist(); render(); return;
     case 'finish': {
       s.finished = true; s.endedAt = Date.now(); state.activeId = null; stopRest(); saveNow(state);

@@ -426,7 +426,7 @@ export const DAYS = {
       S('db_rdl', 3, '8-10', 120, 2),
       S('db_split_squat', 3, '8-10', 90, 2),
       S('leg_ext', 3, '12-15', 60, 3),
-      S('calf_raise', 3, '10-15', 60, 3),
+      S('cable_crunch', 3, '12-15', 45, 3),
       S('pallof', 3, '10-12', 45, 3),
     ],
     cardio: 'finisher', mobility: 'warmup',
